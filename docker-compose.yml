@@ -1,3 +1,4 @@
+name: weknora
 services:
   frontend:
     image: wechatopenai/weknora-ui:${WEKNORA_VERSION:-latest}
@@ -53,13 +54,14 @@ services:
     ports:
       - "${APP_PORT:-8080}:8080"
     volumes:
-      - data-files:/data/files
-      - docreader-tmp:/tmp/docreader:ro
+      # 本地数据统一落盘到宿主机 ./data/（见文件末尾说明），不再使用命名卷
+      - ./data/files:/data/files
+      - ./data/docreader-tmp:/tmp/docreader:ro
       - ./config/config.yaml:/app/config/config.yaml
       # Docker 沙箱默认关闭（见 WEKNORA_SANDBOX_DOCKER_ENABLED）。需要本机 daemon 时
       # 同时设 true 并挂载实际 socket——这等同宿主机 root，仅私有化单机。
       # 入口脚本会按 socket GID 把 appuser 加入对应组（compose group_add 在 gosu 后无效）。
-      # - /var/run/docker.sock:/var/run/docker.sock
+      - /var/run/docker.sock:/var/run/docker.sock
       # Optional: declarative built-in models. Copy config/builtin_models.yaml.example
       # to config/builtin_models.yaml, edit it for your deployment, then
       # uncomment the line below. See website-docs/03-features/06-models.md.
@@ -447,7 +449,7 @@ services:
     expose:
       - "50051"
     volumes:
-      - docreader-tmp:/tmp/docreader
+      - ./data/docreader-tmp:/tmp/docreader
     environment:
       # ========== 基础 ==========
       - TZ=${TZ:-Asia/Shanghai}
@@ -590,7 +592,7 @@ services:
       - POSTGRES_PASSWORD=${DB_PASSWORD}
       - POSTGRES_DB=${DB_NAME}
     volumes:
-      - postgres-data:/var/lib/postgresql/data
+      - ./data/postgres:/var/lib/postgresql/data
     networks:
       - WeKnora-network
     healthcheck:
@@ -607,22 +609,26 @@ services:
     image: redis:7.0-alpine
     container_name: WeKnora-redis
     command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD}
+    volumes:
+      # AOF/RDB 落盘到宿主机 ./data/redis（原来没有挂卷，重建即丢数据）
+      - ./data/redis:/data
     restart: always
     networks:
       - WeKnora-network
 
-  # One-shot init: copy the read-only template settings.yml into a named volume
-  # before searxng starts. Necessary because the searxng entrypoint sed-replaces
-  # `ultrasecretkey` in /etc/searxng/settings.yml in place; bind-mounting the
-  # repo file directly would write the resolved SEARXNG_SECRET back into the
-  # working tree (and prevent re-templating on subsequent restarts).
+  # One-shot init: copy the read-only template settings.yml into the host dir
+  # ./data/searxng (mounted at /etc/searxng) before searxng starts. Necessary
+  # because the searxng entrypoint sed-replaces `ultrasecretkey` in
+  # /etc/searxng/settings.yml in place; bind-mounting the repo file directly
+  # would write the resolved SEARXNG_SECRET back into the working tree (and
+  # prevent re-templating on subsequent restarts).
   searxng-init:
     image: busybox:1.36
     container_name: WeKnora-searxng-init
     command: ["sh", "-c", "cp /template/settings.yml /etc/searxng/settings.yml && chmod 0644 /etc/searxng/settings.yml"]
     volumes:
       - ./docker/searxng/settings.yml:/template/settings.yml:ro
-      - searxng_config:/etc/searxng
+      - ./data/searxng:/etc/searxng
     restart: "no"
     networks:
       - WeKnora-network
@@ -638,7 +644,7 @@ services:
     ports:
       - "${SEARXNG_BIND:-127.0.0.1}:${SEARXNG_PORT:-8888}:8080"
     volumes:
-      - searxng_config:/etc/searxng
+      - ./data/searxng:/etc/searxng
     environment:
       - SEARXNG_BASE_URL=http://localhost:${SEARXNG_PORT:-8888}/
       - INSTANCE_NAME=weknora-searxng
@@ -674,7 +680,7 @@ services:
       - MINIO_ROOT_PASSWORD=${MINIO_SECRET_ACCESS_KEY:-minioadmin}
     command: server --console-address ":9001" /data
     volumes:
-      - minio_data:/data
+      - ./data/minio:/data
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
       interval: 30s
@@ -690,7 +696,7 @@ services:
     image: neo4j:2025.10.1
     container_name: WeKnora-neo4j
     volumes:
-      - neo4j-data:/data
+      - ./data/neo4j:/data
     environment:
       - NEO4J_AUTH=${NEO4J_USERNAME:-neo4j}/${NEO4J_PASSWORD:-password}
       - NEO4J_apoc_export_file_enabled=true
@@ -714,7 +720,7 @@ services:
       - "${QDRANT_REST_PORT:-6333}:6333"
       - "${QDRANT_PORT:-6334}:6334"
     volumes:
-      - qdrant_data:/qdrant/storage
+      - ./data/qdrant:/qdrant/storage
     networks:
       - WeKnora-network
     restart: unless-stopped
@@ -743,7 +749,7 @@ services:
       - "19530:19530"
       - "9091:9091"
     volumes:
-      - milvus_data:/var/lib/milvus
+      - ./data/milvus:/var/lib/milvus
     networks:
       - WeKnora-network
     restart: unless-stopped
@@ -766,7 +772,7 @@ services:
       - "9035:8080"
       - "50052:50051"
     volumes:
-      - weaviate_data:/var/lib/weaviate
+      - ./data/weaviate:/var/lib/weaviate
     networks:
       - WeKnora-network
     restart: unless-stopped
@@ -787,7 +793,7 @@ services:
   # 启用方式：
   #   docker compose --profile doris up -d
   #
-  # 数据持久化在 doris_fe_data / doris_be_data 卷中。
+  # 数据持久化在宿主机 ./data/doris-fe 与 ./data/doris-be 目录中。
   # ---------------------------------------------------------------------------
   doris-fe:
     image: apache/doris:fe-4.1.0
@@ -800,8 +806,8 @@ services:
       - "${DORIS_FE_HTTP_PORT:-8030}:8030"
       - "${DORIS_FE_MYSQL_PORT:-9030}:9030"
     volumes:
-      - doris_fe_meta:/opt/apache-doris/fe/doris-meta
-      - doris_fe_log:/opt/apache-doris/fe/log
+      - ./data/doris-fe/meta:/opt/apache-doris/fe/doris-meta
+      - ./data/doris-fe/log:/opt/apache-doris/fe/log
     networks:
       - WeKnora-network
     restart: unless-stopped
@@ -820,8 +826,8 @@ services:
     ports:
       - "${DORIS_BE_HTTP_PORT:-8040}:8040"
     volumes:
-      - doris_be_storage:/opt/apache-doris/be/storage
-      - doris_be_log:/opt/apache-doris/be/log
+      - ./data/doris-be/storage:/opt/apache-doris/be/storage
+      - ./data/doris-be/log:/opt/apache-doris/be/log
     networks:
       - WeKnora-network
     restart: unless-stopped
@@ -903,8 +909,8 @@ services:
       CLICKHOUSE_USER: ${LANGFUSE_CLICKHOUSE_USER:-clickhouse}
       CLICKHOUSE_PASSWORD: ${LANGFUSE_CLICKHOUSE_PASSWORD:-clickhouse}
     volumes:
-      - langfuse_clickhouse_data:/var/lib/clickhouse
-      - langfuse_clickhouse_logs:/var/log/clickhouse-server
+      - ./data/langfuse-clickhouse/data:/var/lib/clickhouse
+      - ./data/langfuse-clickhouse/logs:/var/log/clickhouse-server
     healthcheck:
       test: wget --no-verbose --tries=1 --spider http://localhost:8123/ping || exit 1
       interval: 5s
@@ -933,7 +939,7 @@ services:
       # 9101：MinIO 控制台（可选，方便排障）
       - "${LANGFUSE_MINIO_CONSOLE_PORT:-9101}:9001"
     volumes:
-      - langfuse_minio_data:/data
+      - ./data/langfuse-minio:/data
     healthcheck:
       test: ["CMD", "mc", "ready", "local"]
       interval: 5s
@@ -1089,20 +1095,21 @@ networks:
   WeKnora-network:
     driver: bridge
 
-volumes:
-  postgres-data:
-  data-files:
-  docreader-tmp:
-  minio_data:
-  neo4j-data:
-  qdrant_data:
-  milvus_data:
-  weaviate_data:
-  doris_fe_meta:
-  doris_fe_log:
-  doris_be_storage:
-  doris_be_log:
-  langfuse_clickhouse_data:
-  langfuse_clickhouse_logs:
-  langfuse_minio_data:
-  searxng_config:
+# 所有持久化数据均以 bind mount 落在宿主机 ./data/ 下（随仓库目录走，便于备份/迁移）：
+#   data/postgres               PostgreSQL/ParadeDB 数据目录
+#   data/redis                  Redis AOF/RDB
+#   data/files                  app 本地文件存储（LOCAL_STORAGE_BASE_DIR=/data/files）
+#   data/docreader-tmp          docreader 解析中间产物（app 以只读方式共享）
+#   data/minio                  MinIO 对象数据（STORAGE_TYPE=minio 时）
+#   data/searxng                searxng 配置（由 searxng-init 从 docker/searxng/settings.yml 模板生成）
+#   data/neo4j                  Neo4j 图数据（--profile neo4j）
+#   data/qdrant                 Qdrant 向量数据（--profile qdrant）
+#   data/milvus                 Milvus 数据（--profile milvus）
+#   data/weaviate               Weaviate 数据（--profile weaviate）
+#   data/doris-fe|data/doris-be Doris FE/BE 元数据与日志（--profile doris）
+#   data/langfuse-*             Langfuse ClickHouse / MinIO 数据（--profile langfuse）
+#
+# 注意：原先的命名卷（postgres-data / data-files / ... ）已全部移除，旧卷中的历史数据
+# 不会自动迁移；如需保留请先 `docker run --rm -v weknora_postgres-data:/from -v
+# "$PWD/data/postgres":/to alpine cp -av /from/. /to/` 之类的方式导出。
+# 顶层不再声明 volumes:
